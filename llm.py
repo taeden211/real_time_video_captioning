@@ -223,7 +223,7 @@ Step-by-step:
 
 MODEL = "gpt-5.4"
 IMAGE_DIR = "sample_data"
-OUTPUT_DIR = "output"
+OUTPUT_DIR = "sample_output"
 MAX_IMAGES = 10
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -562,8 +562,14 @@ def main() -> None:
 
     for i, img_path in enumerate(images, 1):
         name = os.path.basename(img_path)
-        print(f"[{i}/{len(images)}] {name} ... ", end="", flush=True)
+        out_name = os.path.splitext(name)[0] + ".json"
+        out_path = os.path.join(OUTPUT_DIR, out_name)
 
+        # 이미 파일이 존재하면 건너뛰는 코드 추가
+        if os.path.exists(out_path):
+            print(f"[{i}/{len(images)}] {name} ... 이미 존재함 (건너뜀)")
+            success += 1
+            continue
         try:
             data_uri = image_to_data_uri(img_path)
             result, novel = call_api(client, data_uri)
