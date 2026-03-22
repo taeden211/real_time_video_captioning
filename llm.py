@@ -30,7 +30,7 @@ Grounding rules:
 - Ignore tiny, heavily occluded, or ambiguous background objects.
 
 Scene description rules:
-- "scene_description": exactly one factual, dry Korean sentence summarizing the whole visible work situation.
+- "scene_description": factual, dry Korean sentences summarizing the whole visible work situation.
 
 ─────────────────────────────────────────────
 OBJECT RULES
@@ -105,8 +105,11 @@ PPE handling:
 ATTRIBUTE RULES
 ─────────────────────────────────────────────
 
-Every object must have:
-  "attributes": {"ppe": [], "state": []}
+Worker objects: 
+  "attributes": {"ppe": [...], "state": [...]}
+
+Non-worker objects: "attributes": {"state": [...]}
+- Do NOT include the "ppe" key for non-worker objects.
 
 - PPE values (only for workers, only when visually confirmed worn): ["안전모", "안전대"]
 - "state": short Korean descriptors only when visually supported.
@@ -163,7 +166,7 @@ HAZARD RULES
 Only create a hazard when there is direct visual evidence.
 
 Allowed hazard labels:
-["추락", "낙하물", "충돌", "협착", "전도", "감전", "익수", "안전관리 필요"]
+["추락", "낙하물", "충돌", "협착", "전도", "감전", "익수"]
 
 Hazard detection checklist — evaluate each:
 - 추락: worker at height, near unprotected edge, on structure without guardrail
@@ -188,7 +191,7 @@ JSON SCHEMA
       "id": "string",
       "label": "string",
       "attributes": {
-        "ppe": ["string"],
+        "ppe": ["string"], // workers only
         "state": ["string"]
       },
       "location": "string (must describe a visible position in the image)"
@@ -392,10 +395,6 @@ def validate_json(text: str) -> dict:
 
     if not isinstance(data["objects"], list):
         raise ValueError("objects must be a list")
-
-    # Strip global_hazard_tags if model still outputs it
-    if "global_hazard_tags" in data:
-        del data["global_hazard_tags"]
 
     # ── Pass 1: Remove hallucinated objects + normalize labels ──
     valid_ids = set()
