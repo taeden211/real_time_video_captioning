@@ -21,8 +21,8 @@ except ImportError as exc:
 # ---------------------------------------------------------------------------
 
 MODEL = os.getenv("OPENAI_SCENE_MODEL", "gpt-5.4-mini")
-IMAGE_DIR = os.getenv("IMAGE_DIR", "sample_data")
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output2")
+IMAGE_DIR = os.getenv("IMAGE_DIR", "data")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output1")
 MAX_IMAGES = None
 CANDIDATES_PER_IMAGE = 2
 TEMPERATURE = 0.0
@@ -204,229 +204,118 @@ SYNONYM_MAP = {
 # Prompts
 # ---------------------------------------------------------------------------
 
-OBJECT_SYSTEM_PROMPT = f"""당신은 건설현장 안전 장면을 분석하는 시각 언어 주석 모델입니다.
+OBJECT_SYSTEM_PROMPT = f"""You are a vision-language model for annotating construction site safety scenes.
 
-목표는 이미지에 실제로 보이는 객체만 추출하고, 각 객체의 위치와 시각적 근거를 구조화하는 것입니다.
+Goals:
+- Extract only objects that are actually visible in the image.
+- Produce outputs that will be used for text and scene-graph embedding similarity comparisons.
+- Prioritize consistency so that similar visual scenes use the same labels, id prefixes, and relationship directions.
 
-출력 규칙:
-- 반드시 JSON 스키마를 따르세요.
-- 보이지 않는 객체, 가려진 PPE, 추정 위험요소는 만들지 마세요.
-- 애매하면 더 보수적인 라벨과 낮은 confidence를 사용하세요.
-- 한국어 문장은 건조하고 사실적으로 작성하세요.
-- bbox는 전체 이미지 기준 normalized 좌표 [x1, y1, x2, y2]이며 각 값은 0.0~1.0입니다.
+Output rules:
+- Follow the JSON schema strictly.
+- Do not invent non-visible objects, hidden PPE, or speculative hazards.
+- Exclude ambiguous objects or use more conservative labels and lower confidence.
+    "- Write `scene_description` as 2–4 concise, factual sentences in Korean.
+    - `scene_description` should include scene type, main equipment/workers, observed actions, and surrounding structure/soil/water context (in Korean).
+    - Do not assert hazards in `scene_description`; record hazards only in the `hazards` field when clearly visible.
+- Bboxes are normalized coordinates [x1, y1, x2, y2] relative to the full image; values must be between 0.0 and 1.0.
 
-객체 그룹화 정책:
-- Tier 1: 근로자와 모든 중장비/차량은 항상 개별 객체입니다. 절대 group으로 묶지 마세요.
-- Tier 2: 철근, 합판, 파이프, H빔, 토사, 거푸집, 목재, 자재, 개구부는 같은 종류가 같은 구역에 3개 이상 있으면 묶을 수 있습니다.
-- Tier 2 예외: 특정 자재 하나가 근로자나 장비와 직접 상호작용하면 그 자재는 별도 객체로 분리하세요.
-- Tier 3: 난간, 안전망, 방호울타리, 가설울타리, 동바리, 비계, 작업발판은 연속/반복 설치물일 때 하나의 group 객체로 묶으세요.
-- count는 개별 객체면 1, group이면 보이는 대략적 개수를 넣으세요. 연속 구조물은 2 이상으로 두세요.
+Object grouping:
+- Tier 1: Workers and all heavy equipment/vehicles must always be individual objects; never group them.
+- Tier 2: Rebar, plywood, pipes, H-beams, soil, formwork, wood, material, and openings may be grouped only when three or more of the same type appear in the same area.
+- Tier 2 exception: If a specific material is directly interacting with a worker or equipment, separate it as an individual object.
+- Tier 3: Guardrails, safety nets, barriers, temporary fences, props, scaffolds, and work platforms may be grouped when they form continuous or repetitive installations.
+- `count` is for internal validation: individuals = 1, groups = approximate visible count.
 
-라벨 규칙:
-- 가능한 한 다음 선호 라벨을 사용하세요: {", ".join(PREFERRED_LABELS)}
-- 금지 라벨은 사용하지 마세요: {", ".join(sorted(FORBIDDEN_LABELS))}
-- '자재'는 최후의 수단입니다. 가능하면 철근, 합판, 파이프, 목재, 거푸집 등 구체 라벨을 쓰세요.
-- PPE를 착용 중인 경우에는 근로자의 attributes.ppe에만 기록하세요. 착용 중인 안전모/안전대는 별도 객체로 만들지 마세요.
+Label rules:
+- Prefer these labels: {", ".join(PREFERRED_LABELS)}
+- Do not use forbidden generic labels: {", ".join(sorted(FORBIDDEN_LABELS))}
+- Use `material` only as a last resort. Prefer specific labels such as rebar, plywood, pipe, wood, formwork, H-beam, soil.
+- Record PPE only in a worker's `attributes.ppe`; do not create separate objects for worn helmets or safety belts.
 
-중장비 구분:
-- 굴착기: 붐-암-버킷 구조가 보입니다.
-- 지게차: 전방 포크 두 개가 보입니다.
-- 타워크레인: 고정 타워와 수평 지브가 보입니다.
-- 이동식크레인: 트럭/크롤러 위에 붐이 장착되어 있습니다.
-- 덤프트럭: 적재함이 있는 대형 트럭입니다.
-- 로드롤러: 원통형 다짐 드럼이 보입니다.
-- 콘크리트펌프카: 접이식 붐이 있는 콘크리트 펌프 차량입니다.
-- 레미콘: 회전 드럼이 있는 믹서 트럭입니다.
+ID rules:
+- IDs must use the standard label prefixes.
+- Examples: worker_1, excavator_1, tower_crane_1, mobile_crane_1, dump_truck_1, roller_1, mixer_truck_1, barrier_group_1, guardrail_group_1, rebar_group_1.
+- Number objects left-to-right.
 
-스캔 전략:
-- 이미지를 좌상, 우상, 좌하, 우하 4분할로 나누어 확인한 뒤 결과를 병합하세요.
-- 주변부의 작은 근로자와 안전시설을 놓치지 마세요.
+Heavy equipment distinctions:
+- Excavator: visible boom-arm-bucket structure.
+- Forklift: two front forks are visible.
+- Tower crane: fixed tower and horizontal jib are visible.
+- Mobile crane: boom mounted on a truck/crawler is visible.
+- Dump truck: a large truck with an open bed is visible.
+- Roller: a cylindrical compaction drum is visible.
+- Concrete pump: a vehicle with a folding boom for pumping concrete.
+- Mixer truck: a rotating drum mixer is visible.
+
+Scan strategy:
+- Inspect the image in four quadrants (upper-left, upper-right, lower-left, lower-right) and merge the results.
+- Do not miss small workers, water edges, excavation faces, guardrails, or temporary barriers that are important for safety context.
 """
 
-OBJECT_USER_PROMPT = """이미지에서 보이는 건설현장 객체를 추출하세요.
+OBJECT_USER_PROMPT = """Extract visible construction site objects from the image.
 
-작업 순서:
-1. 전체 장면을 짧게 묘사합니다.
-2. 근로자, 중장비/차량, 구조물, 가설시설, 자재, 위험 맥락에 중요한 객체를 찾습니다.
-3. 각 객체에 id, label, count, bbox, location, attributes, confidence, evidence를 부여합니다.
-4. 보이지 않거나 추정에 가까운 객체는 제외합니다.
-5. 모든 id는 label에 맞는 영어 prefix와 번호를 사용합니다. 예: worker_1, excavator_1, rebar_group_1.
+Procedure:
+1. First provide a short scene summary.
+2. Identify workers, heavy equipment/vehicles, structures, temporary installations, safety elements, materials, and water/soil contexts important to the scene.
+3. For each object, include `id`, `label`, `count`, `bbox`, `location`, `attributes`, `confidence`, and `evidence`.
+4. Exclude objects that are not visible or are speculative.
+5. Standardize id prefixes and number same-type objects left-to-right.
+
+Return all textual fields (`scene_description`, `evidence`, etc.) in Korean.
 """
 
-RELATION_SYSTEM_PROMPT = f"""당신은 건설현장 객체 목록을 입력받아 씬그래프 관계와 위험요소를 생성하는 모델입니다.
+RELATION_SYSTEM_PROMPT = f"""You are a model that, given a list of construction site objects and the image, generates scene-graph `relationships` and `hazards`.
 
-중요한 제한:
-- 새 객체를 만들지 마세요.
-- relationships와 hazards는 반드시 입력된 object id만 참조해야 합니다.
-- 이미지에서 직접 확인되는 관계만 생성하세요.
-- 같은 (sub_id, obj_id) 쌍에는 가장 중요한 관계 하나만 생성하세요.
-- 우선순위는 safety > functional > structural > spatial입니다.
+Key constraints:
+- Do not create new objects.
+- `relationships` and `hazards` must reference only the provided object ids.
+- Generate only directly visible relationships.
+- Keep relations concise and meaningful; avoid creating many unnecessary spatial relations that add noise for embedding comparisons.
+- For any (sub_id, obj_id) pair produce only the most important relation.
+- Do not duplicate equivalent bidirectional spatial relations.
+- Priority order: safety > functional > structural > spatial.
+- If a functional relation is clear for a pair, do not also add a spatial relation for the same pair.
 
-관계 카테고리와 predicate:
+Relation categories and predicates:
 - functional: operating, loading, carrying, working_on, walking_on
 - structural: on, inside, attached_to, supported_by, connected_to
 - spatial: next_to, above, below, behind, in_front_of
 - safety: too_close_to, approaching, blocking
 
-방향 규칙:
-- functional: 행위자 또는 움직이는/들고 있는 객체가 sub_id, 대상이 obj_id입니다.
-- structural on/inside: 위나 안에 있는 객체가 sub_id, 받치는/담는 객체가 obj_id입니다.
-- attached_to/supported_by/connected_to: 더 작거나 의존적인 객체가 sub_id입니다.
-- safety: 위험에 노출된 근로자/장비/객체가 sub_id, 위험원 또는 장애물이 obj_id입니다.
-- spatial: 중요 객체를 sub_id로 두고, 중요도가 같으면 좌측 객체를 sub_id로 둡니다.
+Direction rules:
+- functional: actor or moving/holding object is `sub_id`, target is `obj_id`.
+- structural on/inside: the object that is on/inside is `sub_id`, the supporting/containing object is `obj_id`.
+- attached_to/supported_by/connected_to: the smaller or dependent object is `sub_id`.
+- safety: the worker/equipment/object exposed to risk is `sub_id`, the hazard source or obstacle is `obj_id`.
+- spatial: prefer the more important object as `sub_id`; if equal importance, choose the left-most object as `sub_id`.
 
-위험요소:
-- 허용 hazard: {", ".join(VALID_HAZARDS)}
-- 추락: 근로자가 높은 위치에 있고, 해당 위치의 난간/안전망 부재가 명확하거나 좁고 개방된 작업면에 있을 때만 생성합니다.
-- 낙하물: 매달린 하중, 고소 위치 자재, 상부 작업과 하부 객체가 함께 보일 때만 생성합니다.
-- 충돌: 작동/이동 중인 장비와 근로자/장비가 매우 가까울 때만 생성합니다.
-- 협착: 근로자가 장비와 고정물 사이 또는 끼임 지점에 있을 때만 생성합니다.
-- 전도: 사다리, 장비, 적재물이 시각적으로 불안정할 때만 생성합니다.
-- 감전: 노출 전선, 전기설비, 송전선 인접 작업이 보일 때만 생성합니다.
-- 익수: 근로자가 수역 가장자리에 있고 방호가 부족한 것이 보일 때만 생성합니다.
+Hazard generation principles:
+- Allowed hazards: {", ".join(VALID_HAZARDS)}
+- Record hazards only when a clear hazardous condition is visible in the image.
+- If evidence is ambiguous, return an empty `hazards` list.
+- Fall: generate only when a worker is at a drop edge or excavation face and the fall direction and missing protection are clearly visible.
+- Falling object: generate only when suspended loads, high-level materials, or clear upper-lower contexts are visible.
+- Collision: generate only when operating/moving equipment and a worker/equipment are very close.
+- Entrapment: generate only when a worker is in a visible pinch point between equipment and fixed structure or materials.
+- Overturn: generate only when ladders, equipment, or loads appear visually unstable.
+- Electrocution: generate only when exposed wires, electrical equipment, or power lines adjacent to work are clearly visible.
+- Drowning: generate only when a worker is at a water edge or in water and insufficient protection is clearly visible.
+- Do not generate drowning when only water is present or equipment is near shallow water without clear worker exposure.
+- Equipment collaboration is a functional relation; do not create a collision hazard for coordinated equipment work alone.
+- Do not create a collision hazard merely because cars and equipment appear in the same scene.
+- Do not create fall/overturn hazards solely because excavation faces or soil slopes are visible.
 """
 
-RELATION_USER_PROMPT = """아래 객체 목록과 이미지를 함께 보고 relationships와 hazards를 생성하세요.
+RELATION_USER_PROMPT = """Given the object list and the image, generate `relationships` and `hazards`.
 
-주의:
-- objects를 다시 출력하지 마세요. relationships와 hazards만 출력하세요.
-- 입력된 object id만 참조하세요. 새 object id나 새 객체를 만들지 마세요.
-- 관계와 위험은 시각적 근거가 있을 때만 추가하세요.
-- evidence와 reason은 짧은 한국어 사실 문장으로 작성하세요.
-- 관계가 없으면 relationships는 []로 둡니다.
-- 위험이 없으면 hazards는 []로 둡니다.
-"""
-
-RELATION_SYSTEM_PROMPT += """
-
-추가 보수 판정 규칙:
-- hazards는 "그럴 수 있음"이 아니라 "현재 이미지에서 명확히 확인되는 위험 상태"만 기록합니다.
-- 현장 종류, 객체의 일반적 위험성, 단순 근접, 원거리 차량, 정지 장비, 협업 작업만으로 hazard를 만들지 마세요.
-- 근로자의 몸 위치, 장비의 작동/이동 상태, 위험원과의 거리, 방호시설 부재가 동시에 명확하지 않으면 hazards는 []로 둡니다.
-- 익수는 근로자가 수역 경계 바로 옆에 있고, 물 쪽으로 떨어질 수 있는 개방 가장자리와 방호 부족이 명확할 때만 생성합니다.
-- 추락은 근로자가 실제 낙하 가능한 굴착면/구조물/비계 가장자리에 있고, 고저차와 방호 부족이 명확할 때만 생성합니다.
-- 충돌은 근로자 또는 장비가 작동/이동 경로 안에 매우 가까이 있을 때만 생성합니다. 멀리 보이는 차량은 제외합니다.
-- 협착은 근로자가 장비와 고정물 사이, 장비와 자재 사이, 또는 명확한 끼임 공간 안에 있을 때만 생성합니다.
-- 전도는 기울어진 사다리, 불안정한 적재물, 경사면 위 장비처럼 불안정성이 시각적으로 뚜렷할 때만 생성합니다.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Quality-focused prompts used by the pipeline.
-# These override the draft prompts above and keep the final saved JSON aligned
-# with the legacy output/ scene-graph format.
-# ---------------------------------------------------------------------------
-
-OBJECT_SYSTEM_PROMPT = f"""당신은 건설현장 안전 장면을 분석하는 시각 언어 주석 모델입니다.
-
-목표:
-- 이미지에 실제로 보이는 객체만 추출합니다.
-- 결과는 텍스트와 씬그래프 임베딩 유사도 비교에 사용됩니다.
-- 같은 시각 장면은 같은 라벨, 같은 id prefix, 같은 관계 방향으로 표현될 수 있도록 일관성을 최우선으로 합니다.
-
-출력 규칙:
-- 반드시 JSON 스키마를 따르세요.
-- 보이지 않는 객체, 가려진 PPE, 추정 위험요소는 만들지 마세요.
-- 애매한 객체는 제외하거나 더 보수적인 라벨과 낮은 confidence를 사용하세요.
-- scene_description은 2~4개의 건조한 한국어 문장으로 작성하세요.
-- scene_description에는 장면 종류, 주요 장비/근로자, 작업 행위, 주변 구조/토사/수역 맥락을 포함하세요.
-- scene_description에서 위험을 단정하지 마세요. 위험은 hazards에서만, 명확할 때만 기록합니다.
-- bbox는 전체 이미지 기준 normalized 좌표 [x1, y1, x2, y2]이며 각 값은 0.0~1.0입니다.
-
-객체 그룹화:
-- Tier 1: 근로자와 모든 중장비/차량은 항상 개별 객체입니다. 절대 그룹화하지 마세요.
-- Tier 2: 철근, 합판, 파이프, H빔, 토사, 거푸집, 목재, 자재, 개구부는 같은 종류가 같은 구역에 3개 이상 있을 때만 group으로 묶을 수 있습니다.
-- Tier 2 예외: 특정 자재 하나가 근로자나 장비와 직접 상호작용하면 별도 객체로 분리합니다.
-- Tier 3: 난간, 안전망, 방호울타리, 가설울타리, 동바리, 비계, 작업발판은 연속/반복 설치물일 때 group으로 묶습니다.
-- count는 내부 검증용입니다. 개별 객체는 1, group은 보이는 대략적 개수를 넣습니다.
-
-라벨 규칙:
-- 가능한 한 다음 선호 라벨을 사용하세요: {", ".join(PREFERRED_LABELS)}
-- 금지 라벨은 사용하지 마세요: {", ".join(sorted(FORBIDDEN_LABELS))}
-- '자재'는 최후의 수단입니다. 가능하면 철근, 합판, 파이프, 목재, 거푸집, H빔, 토사 등 구체 라벨을 쓰세요.
-- PPE 착용은 근로자의 attributes.ppe에만 기록합니다. 착용 중인 안전모/안전대는 별도 객체로 만들지 마세요.
-
-id 규칙:
-- id는 반드시 라벨별 표준 prefix를 사용하세요.
-- 예: worker_1, excavator_1, tower_crane_1, mobile_crane_1, dump_truck_1, roller_1, mixer_truck_1, barrier_group_1, guardrail_group_1, rebar_group_1.
-- 왼쪽에서 오른쪽 순서로 번호를 매기세요.
-
-중장비 구분:
-- 굴착기: 붐-암-버킷 구조가 보입니다.
-- 지게차: 전방 포크 두 개가 보입니다.
-- 타워크레인: 고정 타워와 수평 지브가 보입니다.
-- 이동식크레인: 트럭/크롤러 위에 붐이 장착되어 있습니다.
-- 덤프트럭: 적재함이 있는 대형 트럭입니다.
-- 로드롤러: 원통형 다짐 드럼이 보입니다.
-- 콘크리트펌프카: 접이식 붐이 있는 콘크리트 펌프 차량입니다.
-- 레미콘: 회전 드럼이 있는 믹서 트럭입니다.
-
-스캔 전략:
-- 이미지를 좌상, 우상, 좌하, 우하 4분할로 나누어 확인한 뒤 결과를 병합하세요.
-- 작은 근로자, 수역, 굴착면, 난간, 방호울타리처럼 안전 맥락에 중요한 객체를 놓치지 마세요.
-"""
-
-OBJECT_USER_PROMPT = """이미지에서 보이는 건설현장 객체를 추출하세요.
-
-작업 순서:
-1. 전체 장면을 먼저 요약합니다.
-2. 근로자, 중장비/차량, 구조물, 가설시설, 안전시설, 자재, 수역/토사처럼 장면 의미에 중요한 객체를 찾습니다.
-3. 각 객체에 id, label, count, bbox, location, attributes, confidence, evidence를 부여합니다.
-4. 보이지 않거나 추정에 가까운 객체는 제외합니다.
-5. id prefix를 표준화하고, 같은 종류 객체는 왼쪽에서 오른쪽 순서로 번호를 매깁니다.
-"""
-
-RELATION_SYSTEM_PROMPT = f"""당신은 건설현장 객체 목록과 이미지를 함께 보고 씬그래프 관계와 위험요소를 생성하는 모델입니다.
-
-중요 제한:
-- 새 객체를 만들지 마세요.
-- relationships와 hazards는 반드시 입력된 object id만 참조해야 합니다.
-- 직접 보이는 관계만 생성하세요.
-- 관계는 적지만 의미 있게 생성하세요. 임베딩 비교에 불필요한 spatial 관계를 많이 만들지 마세요.
-- 같은 (sub_id, obj_id) 쌍에는 가장 중요한 관계 하나만 생성합니다.
-- 같은 의미의 양방향 spatial 관계를 중복 생성하지 마세요.
-- 우선순위는 safety > functional > structural > spatial입니다.
-- functional 관계가 명확하면 같은 쌍의 spatial 관계는 추가하지 마세요.
-
-관계 카테고리와 predicate:
-- functional: operating, loading, carrying, working_on, walking_on
-- structural: on, inside, attached_to, supported_by, connected_to
-- spatial: next_to, above, below, behind, in_front_of
-- safety: too_close_to, approaching, blocking
-
-방향 규칙:
-- functional: 행위자 또는 움직이는/들고 있는 객체가 sub_id, 대상이 obj_id입니다.
-- structural on/inside: 위나 안에 있는 객체가 sub_id, 받치는/담는 객체가 obj_id입니다.
-- attached_to/supported_by/connected_to: 더 작거나 의존적인 객체가 sub_id입니다.
-- safety: 위험에 노출된 근로자/장비/객체가 sub_id, 위험원 또는 장애물이 obj_id입니다.
-- spatial: 중요 객체를 sub_id로 두고, 중요도가 같으면 왼쪽 객체를 sub_id로 둡니다.
-
-위험요소 생성 원칙:
-- 허용 hazard: {", ".join(VALID_HAZARDS)}
-- 위험요소는 가능성이나 일반 상식이 아니라 이미지에서 명확히 보이는 위험 상태일 때만 생성합니다.
-- 근거가 애매하면 hazards는 []로 둡니다.
-- 추락: 근로자가 높은 위치 또는 굴착면 가장자리에 있고, 실제 낙하 방향과 방호 부족이 명확할 때만 생성합니다.
-- 낙하물: 매달린 하중, 고소 위치 자재, 상부 작업과 하부 객체가 함께 명확히 보일 때만 생성합니다.
-- 충돌: 작동/이동 중인 장비와 근로자/장비가 매우 가까울 때만 생성합니다.
-- 협착: 근로자가 장비와 고정물 사이 또는 끼임 지점에 있을 때만 생성합니다.
-- 전도: 사다리, 장비, 적재물이 시각적으로 불안정할 때만 생성합니다.
-- 감전: 노출 전선, 전기설비, 송전선 인접 작업이 명확할 때만 생성합니다.
-- 익수: 근로자가 수역 가장자리 또는 수중에 있고 방호가 부족한 것이 보일 때만 생성합니다.
-- 수역만 보이거나 장비가 물가/얕은 물 위에 있는 것만으로는 익수를 생성하지 않습니다.
-- 장비 간 협업 작업은 functional 관계입니다. 굴착기와 덤프트럭이 함께 작업한다는 이유만으로 충돌을 생성하지 않습니다.
-- 승용차와 장비가 같은 현장에 보이는 것만으로 충돌을 생성하지 않습니다.
-- 굴착면이나 토사 사면이 보이는 것만으로 추락/전도를 생성하지 않습니다.
-"""
-
-RELATION_USER_PROMPT = """아래 객체 목록과 이미지를 함께 보고 relationships와 hazards를 생성하세요.
-
-주의:
-- objects를 다시 출력하지 마세요. relationships와 hazards만 출력하세요.
-- 입력된 object id만 참조하세요. 새 object id나 새 객체를 만들지 마세요.
-- 관계와 위험은 시각적 근거가 있을 때만 추가하세요.
-- evidence와 reason은 짧은 한국어 사실 문장으로 작성하세요.
-- 관계가 없으면 relationships는 []로 둡니다.
-- 위험이 없으면 hazards는 []로 둡니다.
+Notes:
+- Do not re-output the `objects` array. Return only `relationships` and `hazards`.
+- Reference only the provided object ids; do not create new ids or objects.
+- Add relations and hazards only when there is visual evidence.
+- Write short factual `evidence` and `reason` sentences in Korean.
+- If there are no relationships, return an empty list for `relationships`.
+- If there are no hazards, return an empty list for `hazards`.
 """
 
 

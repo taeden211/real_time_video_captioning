@@ -1,6 +1,10 @@
 .env
+.venv*/
 __pycache__/
 data/
 output/
+da3/
 .vscode/
 old_output/
+*.safetensors
+icdm2026_scene_schema_draftv4.pdf
